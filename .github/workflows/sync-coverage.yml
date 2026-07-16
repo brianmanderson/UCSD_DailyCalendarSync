@@ -1,0 +1,48 @@
+name: Sync coverage to calendar
+
+on:
+  schedule:
+    # GitHub cron runs in UTC. 01:00 UTC = 5:00 PM PST (6:00 PM during PDT).
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log what would be created without creating anything"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync coverage to calendar
+        env:
+          CALENDAR_PROVIDER: ${{ secrets.CALENDAR_PROVIDER }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          COVERAGE_INITIALS: ${{ secrets.COVERAGE_INITIALS }}
+          EVENT_TIMEZONE: ${{ secrets.EVENT_TIMEZONE }}
+          EVENT_START: ${{ secrets.EVENT_START }}
+          EVENT_END: ${{ secrets.EVENT_END }}
+          TITLE_RENAMES: ${{ secrets.TITLE_RENAMES }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_CALENDAR_NAME: ${{ secrets.GOOGLE_CALENDAR_NAME }}
+          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+          MS_CALENDAR_USER: ${{ secrets.MS_CALENDAR_USER }}
+          MS_CALENDAR_NAME: ${{ secrets.MS_CALENDAR_NAME }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python sync.py
