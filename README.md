@@ -6,9 +6,10 @@ coverage/staffing spreadsheet. Once a day it:
 1. Downloads a shared Google Sheet that has one tab per week.
 2. Scans **this week's and next week's** tabs for every task assigned to a set
    of initials (e.g. `BA`).
-3. Makes sure a matching event (default **6:00–9:00 AM**) exists on the target
-   calendar for each assignment — creating any that are missing and never
-   duplicating ones that already exist.
+3. Makes sure a matching event exists on the target calendar for each
+   assignment — using task-specific working hours (see
+   [Event hours](#event-hours)), creating any events that are missing and
+   never duplicating ones that already exist.
 
 It runs entirely inside GitHub Actions on a schedule, so nothing has to run on
 your own machine. All credentials and personal settings live in GitHub Actions
@@ -93,9 +94,42 @@ Optional settings (all have defaults):
 | ------------------- | --------------------- | ------------------------------------------------------------------- |
 | `CALENDAR_PROVIDER` | `google`              | `google` or `outlook`                                               |
 | `EVENT_TIMEZONE`    | `America/Los_Angeles` | IANA timezone for "today", event times, and duplicate checks        |
-| `EVENT_START`       | `06:00`               | Event start time (24-hour `HH:MM`, local to `EVENT_TIMEZONE`)       |
-| `EVENT_END`         | `09:00`               | Event end time                                                      |
-| `TITLE_RENAMES`     | *(empty)*             | Semicolon-separated `Sheet Task=Event Title` pairs, e.g. `External Beam=Hillcrest` — renames a task before it becomes an event title |
+| `EVENT_START`       | `05:30`               | Fallback start time for tasks no hour rule matches (24-hour `HH:MM`, local to `EVENT_TIMEZONE`) |
+| `EVENT_END`         | `07:30`               | Fallback end time                                                   |
+| `TASK_HOURS`        | *(empty)*             | Semicolon-separated `Task Substring=HH:MM-HH:MM` rules that override the built-in hour rules — see [Event hours](#event-hours) |
+| `TITLE_RENAMES`     | `External Beam=Hillcrest;All Clinic=Encinitas` | Semicolon-separated `Sheet Task=Event Title` pairs — renames a task before it becomes an event title. Set to `-` to disable the defaults. |
+
+### Event hours
+
+Each event's start/end times come from the assignment's task name (and its
+column-A section, treated as the site), checked in this order — first match
+wins:
+
+| Rule (case-insensitive)                             | Hours         |
+| --------------------------------------------------- | ------------- |
+| Task contains `hdr` and the word `am`                | 07:00–13:00   |
+| Task contains `hdr` and the word `pm`                | 13:00–16:00   |
+| Task contains `hdr` (anything else)                  | 07:00–16:00   |
+| Task contains `external beam`                        | 07:00–16:00   |
+| Section contains `enc` (Encinitas)                   | 07:00–16:00   |
+| Task contains `primary` at Hillcrest (`hillcrest`/`hc` in section or task) | 06:30–16:00 |
+| Task contains `primary` (anywhere else)              | 06:00–13:00   |
+| Task contains `secondary`                            | 08:30–16:30   |
+| Task contains `late`                                 | 13:00–19:00   |
+| Task contains `plan check`                           | 08:30–16:30   |
+| Task contains `ethos`                                | 08:30–16:30   |
+| Anything else                                        | `EVENT_START`–`EVENT_END` (default 05:30–07:30) |
+
+To override or extend these without editing code, set the `TASK_HOURS` secret
+to semicolon-separated `Task Substring=HH:MM-HH:MM` rules. They are matched
+against the task name in the order given, **before** the built-in rules, e.g.:
+
+```
+Secondary=09:00-17:00;Plan Check=08:00-16:00
+```
+
+(Hours are only applied when an event is created; already-existing events are
+never modified.)
 
 ### 4. Test it
 

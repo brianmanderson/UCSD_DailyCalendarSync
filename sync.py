@@ -14,6 +14,7 @@ see README.md for the full list.
 import datetime
 import os
 import json
+import re
 import sys
 import tempfile
 import traceback
@@ -29,6 +30,7 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/calendar",
 ]
+DEFAULT_RENAMES = "External Beam=Hillcrest;All Clinic=Encinitas"
 
 
 class ConfigError(Exception):
@@ -56,6 +58,66 @@ def _parse_renames(raw):
     return renames
 
 
+def _parse_hour_rules(raw):
+    """Parse 'Task Substring=HH:MM-HH:MM;...' into ordered (substring, hours) rules."""
+    rules = []
+    for pair in raw.split(";"):
+        if not pair.strip():
+            continue
+        if "=" not in pair:
+            raise ConfigError(f"TASK_HOURS entry {pair.strip()!r} must look like 'Task=HH:MM-HH:MM'")
+        substring, hours = pair.split("=", 1)
+        match = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*", hours)
+        if not (substring.strip() and match):
+            raise ConfigError(f"TASK_HOURS entry {pair.strip()!r} must look like 'Task=HH:MM-HH:MM'")
+        rules.append((substring.strip().lower(), (match.group(1).zfill(5), match.group(2).zfill(5))))
+    return rules
+
+
+def builtin_hours(task, section):
+    """Task/site-specific shift hours, ported from ScheduleToOutlook's GetActualHours."""
+    task = task.lower()
+    section = (section or "").lower()
+    if "hdr" in task:
+        # Word boundaries so "beam"/"pm" inside other words don't match
+        if re.search(r"\bam\b", task):
+            return ("07:00", "13:00")  # Brachy AM
+        if re.search(r"\bpm\b", task):
+            return ("13:00", "16:00")  # Brachy PM
+        return ("07:00", "16:00")  # Brachy
+    if "external beam" in task:
+        return ("07:00", "16:00")  # Hillcrest external beam
+    if "enc" in section:
+        return ("07:00", "16:00")  # Encinitas
+    if "primary" in task:
+        # HC (Hillcrest) Primary keeps longer hours than other sites
+        hillcrest = (
+            "hillcrest" in section
+            or re.search(r"\bhc\b", section)
+            or re.search(r"\bhc\b", task)
+        )
+        return ("06:30", "16:00") if hillcrest else ("06:00", "13:00")
+    if "secondary" in task:
+        return ("08:30", "16:30")
+    if "late" in task:
+        return ("13:00", "19:00")
+    if "plan check" in task:
+        return ("08:30", "16:30")
+    if "ethos" in task:
+        return ("08:30", "16:30")
+    return None
+
+
+def event_hours(cfg, task, section):
+    """Return (start, end) for an assignment: TASK_HOURS overrides, then the
+    built-in rules, then the EVENT_START/EVENT_END fallback."""
+    task_lower = task.lower()
+    for substring, hours in cfg.hour_rules:
+        if substring in task_lower:
+            return hours
+    return builtin_hours(task, section) or (cfg.event_start, cfg.event_end)
+
+
 def _check(response, action):
     if response.status_code >= 300:
         raise RuntimeError(
@@ -69,9 +131,10 @@ class Config:
         self.sheet_id = _require("SHEET_ID")
         self.initials = _require("COVERAGE_INITIALS")
         self.timezone = _env("EVENT_TIMEZONE", "America/Los_Angeles")
-        self.event_start = _env("EVENT_START", "06:00")
-        self.event_end = _env("EVENT_END", "09:00")
-        self.renames = _parse_renames(_env("TITLE_RENAMES"))
+        self.event_start = _env("EVENT_START", "05:30")
+        self.event_end = _env("EVENT_END", "07:30")
+        self.renames = _parse_renames(_env("TITLE_RENAMES", DEFAULT_RENAMES))
+        self.hour_rules = _parse_hour_rules(_env("TASK_HOURS"))
         self.dry_run = _env("DRY_RUN").lower() in ("1", "true", "yes")
         self.google_sa_json = _env("GOOGLE_SERVICE_ACCOUNT_JSON")
         self.google_calendar_id = _env("GOOGLE_CALENDAR_ID")
@@ -181,15 +244,15 @@ class GoogleCalendar:
             if not page_token:
                 return titles
 
-    def create_event(self, title, date):
+    def create_event(self, title, date, start, end):
         body = {
             "summary": title,
             "start": {
-                "dateTime": f"{date.isoformat()}T{self.cfg.event_start}:00",
+                "dateTime": f"{date.isoformat()}T{start}:00",
                 "timeZone": self.cfg.timezone,
             },
             "end": {
-                "dateTime": f"{date.isoformat()}T{self.cfg.event_end}:00",
+                "dateTime": f"{date.isoformat()}T{end}:00",
                 "timeZone": self.cfg.timezone,
             },
         }
@@ -263,15 +326,15 @@ class OutlookCalendar:
             params = None
         return titles
 
-    def create_event(self, title, date):
+    def create_event(self, title, date, start, end):
         body = {
             "subject": title,
             "start": {
-                "dateTime": f"{date.isoformat()}T{self.cfg.event_start}:00",
+                "dateTime": f"{date.isoformat()}T{start}:00",
                 "timeZone": self.cfg.timezone,
             },
             "end": {
-                "dateTime": f"{date.isoformat()}T{self.cfg.event_end}:00",
+                "dateTime": f"{date.isoformat()}T{end}:00",
                 "timeZone": self.cfg.timezone,
             },
         }
@@ -292,8 +355,8 @@ def report(cfg, today, data, rows, warnings):
             )
     if rows:
         width = max(len(row[3]) for row in rows)
-        for _label, date, day, title, status in rows:
-            print(f"  {date} {day:<4} {title:<{width}}  {status.upper()}")
+        for _label, date, day, title, hours, status in rows:
+            print(f"  {date} {day:<4} {title:<{width}}  {hours}  {status.upper()}")
     else:
         print("  nothing to sync")
     for message in warnings:
@@ -304,10 +367,10 @@ def report(cfg, today, data, rows, warnings):
         with open(summary_path, "a", encoding="utf-8") as fh:
             fh.write(f"## Coverage sync — {today.isoformat()}\n\n")
             if rows:
-                fh.write("| Week | Date | Day | Event | Status |\n")
-                fh.write("|---|---|---|---|---|\n")
-                for label, date, day, title, status in rows:
-                    fh.write(f"| {label} | {date} | {day} | {title} | {status} |\n")
+                fh.write("| Week | Date | Day | Event | Hours | Status |\n")
+                fh.write("|---|---|---|---|---|---|\n")
+                for label, date, day, title, hours, status in rows:
+                    fh.write(f"| {label} | {date} | {day} | {title} | {hours} | {status} |\n")
             else:
                 fh.write("No assignments found — nothing to sync.\n")
             if warnings:
@@ -343,6 +406,7 @@ def main():
         for assignment in week["assignments"]:
             title = cfg.renames.get(assignment["task"].lower(), assignment["task"])
             date = datetime.date.fromisoformat(assignment["date"])
+            start, end = event_hours(cfg, assignment["task"], assignment.get("section"))
             if date not in titles_by_date:
                 titles_by_date[date] = target.existing_titles(date)
             if title.strip().lower() in titles_by_date[date]:
@@ -350,10 +414,12 @@ def main():
             elif cfg.dry_run:
                 status = "would create (dry run)"
             else:
-                target.create_event(title, date)
+                target.create_event(title, date, start, end)
                 titles_by_date[date].add(title.strip().lower())
                 status = "created"
-            rows.append((week["label"], assignment["date"], assignment["day"], title, status))
+            rows.append(
+                (week["label"], assignment["date"], assignment["day"], title, f"{start}-{end}", status)
+            )
 
     report(cfg, today, data, rows, warnings)
 
