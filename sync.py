@@ -32,7 +32,8 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/calendar",
 ]
-DEFAULT_RENAMES = "External Beam=Hillcrest;All Clinic=Encinitas"
+DEFAULT_RENAMES = "External Beam=Hillcrest;All Clinic=Encinitas;LJ & HC On-Call=On Call"
+ALL_DAY = (None, None)  # sentinel returned instead of (start, end) for all-day shifts
 
 
 class ConfigError(Exception):
@@ -61,17 +62,26 @@ def _parse_renames(raw):
 
 
 def _parse_hour_rules(raw):
-    """Parse 'Task Substring=HH:MM-HH:MM;...' into ordered (substring, hours) rules."""
+    """Parse 'Task Substring=HH:MM-HH:MM;...' into ordered (substring, hours)
+    rules. The hours may also be 'all day' for a shift that covers the day."""
     rules = []
     for pair in raw.split(";"):
         if not pair.strip():
             continue
+        problem = ConfigError(
+            f"TASK_HOURS entry {pair.strip()!r} must look like 'Task=HH:MM-HH:MM' or 'Task=all day'"
+        )
         if "=" not in pair:
-            raise ConfigError(f"TASK_HOURS entry {pair.strip()!r} must look like 'Task=HH:MM-HH:MM'")
+            raise problem
         substring, hours = pair.split("=", 1)
+        if not substring.strip():
+            raise problem
+        if hours.strip().lower().replace("-", " ") == "all day":
+            rules.append((substring.strip().lower(), ALL_DAY))
+            continue
         match = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*", hours)
-        if not (substring.strip() and match):
-            raise ConfigError(f"TASK_HOURS entry {pair.strip()!r} must look like 'Task=HH:MM-HH:MM'")
+        if not match:
+            raise problem
         rules.append((substring.strip().lower(), (match.group(1).zfill(5), match.group(2).zfill(5))))
     return rules
 
@@ -80,6 +90,8 @@ def builtin_hours(task, section):
     """Task/site-specific shift hours, ported from ScheduleToOutlook's GetActualHours."""
     task = task.lower()
     section = (section or "").lower()
+    if "on-call" in task or "on call" in task:
+        return ALL_DAY  # on-call covers the whole day, not a shift
     if "hdr" in task:
         # Word boundaries so "beam"/"pm" inside other words don't match
         if re.search(r"\bam\b", task):
@@ -111,13 +123,21 @@ def builtin_hours(task, section):
 
 
 def event_hours(cfg, task, section):
-    """Return (start, end) for an assignment: TASK_HOURS overrides, then the
-    built-in rules, then the EVENT_START/EVENT_END fallback."""
+    """Return (start, end) for an assignment — or ALL_DAY: TASK_HOURS
+    overrides, then the built-in rules, then the EVENT_START/EVENT_END
+    fallback."""
     task_lower = task.lower()
     for substring, hours in cfg.hour_rules:
         if substring in task_lower:
             return hours
-    return builtin_hours(task, section) or (cfg.event_start, cfg.event_end)
+    builtin = builtin_hours(task, section)
+    if builtin is None:
+        return (cfg.event_start, cfg.event_end)
+    return builtin  # may be ALL_DAY, which is falsey-looking but meaningful
+
+
+def hours_label(hours):
+    return "all day" if hours == ALL_DAY else f"{hours[0]}-{hours[1]}"
 
 
 def _check(response, action):
@@ -248,18 +268,23 @@ class GoogleCalendar:
                 return events
 
     def create_event(self, title, date, start, end):
-        body = {
-            "summary": title,
-            "start": {
-                "dateTime": f"{date.isoformat()}T{start}:00",
-                "timeZone": self.cfg.timezone,
-            },
-            "end": {
-                "dateTime": f"{date.isoformat()}T{end}:00",
-                "timeZone": self.cfg.timezone,
-            },
-        }
-        response = self.session.post(f"{self.calendar_path}/events", json=body, timeout=30)
+        tomorrow = date + datetime.timedelta(days=1)
+        if start is None:  # all-day: Google uses bare dates, end is exclusive
+            when = {"start": {"date": date.isoformat()}, "end": {"date": tomorrow.isoformat()}}
+        else:
+            when = {
+                "start": {
+                    "dateTime": f"{date.isoformat()}T{start}:00",
+                    "timeZone": self.cfg.timezone,
+                },
+                "end": {
+                    "dateTime": f"{date.isoformat()}T{end}:00",
+                    "timeZone": self.cfg.timezone,
+                },
+            }
+        response = self.session.post(
+            f"{self.calendar_path}/events", json={"summary": title, **when}, timeout=30
+        )
         _check(response, f"creating event {title!r} on {date}")
         return response.json().get("id")
 
@@ -339,17 +364,16 @@ class OutlookCalendar:
         return events
 
     def create_event(self, title, date, start, end):
-        body = {
-            "subject": title,
-            "start": {
-                "dateTime": f"{date.isoformat()}T{start}:00",
-                "timeZone": self.cfg.timezone,
-            },
-            "end": {
-                "dateTime": f"{date.isoformat()}T{end}:00",
-                "timeZone": self.cfg.timezone,
-            },
-        }
+        body = {"subject": title}
+        if start is None:
+            # Graph all-day events must run midnight to midnight; end is exclusive.
+            tomorrow = date + datetime.timedelta(days=1)
+            body["isAllDay"] = True
+            start_at, end_at = f"{date.isoformat()}T00:00:00", f"{tomorrow.isoformat()}T00:00:00"
+        else:
+            start_at, end_at = f"{date.isoformat()}T{start}:00", f"{date.isoformat()}T{end}:00"
+        body["start"] = {"dateTime": start_at, "timeZone": self.cfg.timezone}
+        body["end"] = {"dateTime": end_at, "timeZone": self.cfg.timezone}
         response = self.session.post(f"{self.calendar_path}/events", json=body, timeout=30)
         _check(response, f"creating event {title!r} on {date}")
         return response.json().get("id")
@@ -481,18 +505,19 @@ def main():
             title = cfg.renames.get(assignment["task"].lower(), assignment["task"])
             date = datetime.date.fromisoformat(assignment["date"])
             key = title.strip().lower()
-            start, end = event_hours(cfg, assignment["task"], assignment.get("section"))
+            hours = event_hours(cfg, assignment["task"], assignment.get("section"))
             assigned_titles.setdefault(date, set()).add(key)
             if key in events_on(date):
                 status = "already exists"
             elif cfg.dry_run:
                 status = "would create (dry run)"
             else:
-                event_id = target.create_event(title, date, start, end)
+                event_id = target.create_event(title, date, *hours)
                 events_on(date).setdefault(key, []).append((event_id, title))
                 status = "created"
             rows.append(
-                (week["label"], assignment["date"], assignment["day"], title, f"{start}-{end}", status)
+                (week["label"], assignment["date"], assignment["day"], title,
+                 hours_label(hours), status)
             )
 
     if cfg.prune:

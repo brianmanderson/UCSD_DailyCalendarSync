@@ -17,6 +17,7 @@ import sys
 import openpyxl
 
 DAY_COLUMNS = range(3, 10)  # columns C..I
+FIRST_TASK_ROW = 3  # rows 1-2 are the date and weekday headers
 
 
 def _as_date(value):
@@ -83,7 +84,7 @@ def _parse_week(workbook, monday, label, initials):
         )
 
     section = None
-    for row in range(1, sheet.max_row + 1):
+    for row in range(FIRST_TASK_ROW, sheet.max_row + 1):
         header = sheet.cell(row=row, column=1).value
         if header and str(header).strip():
             section = str(header).strip()

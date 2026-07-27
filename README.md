@@ -97,8 +97,8 @@ Optional settings (all have defaults):
 | `EVENT_TIMEZONE`    | `America/Los_Angeles` | IANA timezone for "today", event times, and duplicate checks        |
 | `EVENT_START`       | `05:30`               | Fallback start time for tasks no hour rule matches (24-hour `HH:MM`, local to `EVENT_TIMEZONE`) |
 | `EVENT_END`         | `07:30`               | Fallback end time                                                   |
-| `TASK_HOURS`        | *(empty)*             | Semicolon-separated `Task Substring=HH:MM-HH:MM` rules that override the built-in hour rules — see [Event hours](#event-hours) |
-| `TITLE_RENAMES`     | `External Beam=Hillcrest;All Clinic=Encinitas` | Semicolon-separated `Sheet Task=Event Title` pairs — renames a task before it becomes an event title. Set to `-` to disable the defaults. |
+| `TASK_HOURS`        | *(empty)*             | Semicolon-separated `Task Substring=HH:MM-HH:MM` (or `Task Substring=all day`) rules that override the built-in hour rules — see [Event hours](#event-hours) |
+| `TITLE_RENAMES`     | `External Beam=Hillcrest;All Clinic=Encinitas;LJ & HC On-Call=On Call` | Semicolon-separated `Sheet Task=Event Title` pairs — renames a task before it becomes an event title. Set to `-` to disable the defaults. |
 | `PRUNE_REMOVED`     | `true`                | Delete events for coverage tasks you're no longer assigned. Set to `false` to make the sync add-only. |
 
 ### Event hours
@@ -109,6 +109,7 @@ wins:
 
 | Rule (case-insensitive)                             | Hours         |
 | --------------------------------------------------- | ------------- |
+| Task contains `on-call` / `on call`                  | **all day**   |
 | Task contains `hdr` and the word `am`                | 07:00–13:00   |
 | Task contains `hdr` and the word `pm`                | 13:00–16:00   |
 | Task contains `hdr` (anything else)                  | 07:00–16:00   |
@@ -130,8 +131,35 @@ against the task name in the order given, **before** the built-in rules, e.g.:
 Secondary=09:00-17:00;Plan Check=08:00-16:00
 ```
 
+The hours may also be the literal `all day`, which creates an all-day event
+instead of a timed one:
+
+```
+LDR=all day
+```
+
 (Hours are only applied when an event is created; already-existing events are
 never modified.)
+
+#### On-call
+
+On-call rows are all-day rather than a shift, so any task whose name contains
+`on-call` or `on call` creates an all-day event. On the coverage sheet this is
+the **Enterprise → "LJ & HC On-Call"** row, which the default `TITLE_RENAMES`
+shortens to **"On Call"** on the calendar. It's matched by task name, not by
+row number, so inserting rows above it doesn't break anything.
+
+An all-day on-call event sits alongside that day's timed events rather than
+replacing them — if you're on-call Saturday *and* covering a Saturday clinic
+shift, you get both.
+
+#### Weekends
+
+Columns C–I cover Monday through Sunday, so Saturday (column H) and Sunday
+(column I) assignments sync exactly like weekdays and use the same hour rules
+— a Saturday "Clinic Primary" at La Jolla lands at 06:00–13:00, same as a
+Monday one. There are no weekend-specific hours; add a `TASK_HOURS` rule if
+you need different ones.
 
 ### 4. Test it
 
