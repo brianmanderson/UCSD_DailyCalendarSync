@@ -4,8 +4,8 @@ A GitHub Actions workflow that keeps a personal calendar in sync with a shared
 coverage/staffing spreadsheet. Once a day it:
 
 1. Downloads a shared Google Sheet that has one tab per week.
-2. Scans **this week's and next week's** tabs for every task assigned to a set
-   of initials (e.g. `BA`).
+2. Scans the tabs for **this week and the next two** for every task assigned
+   to a set of initials (e.g. `BA`).
 3. Makes the target calendar match the sheet — creating an event for every
    assignment that doesn't have one yet (using task-specific working hours,
    see [Event hours](#event-hours)), never duplicating events that already
@@ -278,8 +278,11 @@ python parse_coverage.py coverage.xlsx BA 2026-07-16 # pretend it's this date
   the service account with "Make changes to events", or `GOOGLE_CALENDAR_ID`
   is wrong.
 - **"no tab whose first date cell (C1) is …"** — the weekly tab for that
-  Monday doesn't exist yet (common for "next week") or C1 doesn't contain a
-  real date value. This is reported as a warning, not a failure.
+  Monday doesn't exist yet or C1 doesn't contain a real date value. This is
+  reported as a warning, not a failure. Expect it routinely for the later
+  weeks: the sync looks three weeks out, and the sheet is often only filled in
+  a week or two ahead. Nothing is created or deleted for a week that's
+  missing.
 - **Graph 403 (Outlook)** — admin consent wasn't granted, or an application
   access policy blocks the mailbox.
 - **Nothing found for your initials** — cells must match exactly (aside from

@@ -27,8 +27,16 @@ def _as_date(value):
     return None
 
 
-def parse_assignments(xlsx_path, initials, today):
-    """Return this week's and next week's assignments for the given initials.
+WEEKS = 3  # this week plus the next two
+
+
+def _label(offset):
+    return {0: "this week", 1: "next week"}.get(offset, f"in {offset} weeks")
+
+
+def parse_assignments(xlsx_path, initials, today, weeks=WEEKS):
+    """Return this week's and the following weeks' assignments for the given
+    initials — `weeks` tabs in total, starting with the one containing today.
 
     Each week also carries the days it covers and every task name listed on
     that tab (whoever they are assigned to), so the caller can tell which
@@ -37,11 +45,11 @@ def parse_assignments(xlsx_path, initials, today):
     workbook = openpyxl.load_workbook(xlsx_path, data_only=True)
     initials = initials.strip().upper()
     monday = today - datetime.timedelta(days=today.weekday())
-    weeks = [
-        _parse_week(workbook, monday, "this week", initials),
-        _parse_week(workbook, monday + datetime.timedelta(days=7), "next week", initials),
+    parsed = [
+        _parse_week(workbook, monday + datetime.timedelta(days=7 * offset), _label(offset), initials)
+        for offset in range(weeks)
     ]
-    return {"today": today.isoformat(), "initials": initials, "weeks": weeks}
+    return {"today": today.isoformat(), "initials": initials, "weeks": parsed}
 
 
 def _parse_week(workbook, monday, label, initials):

@@ -2,7 +2,7 @@
 """Sync one person's coverage-sheet assignments into a calendar.
 
 Downloads a shared Google Sheet (one tab per week), finds every task assigned
-to the configured initials for this week and next week, and makes the target
+to the configured initials for this week and the next two, and makes the target
 calendar match: missing assignments are created, and events for tasks we are
 no longer assigned are deleted. Events with the same title already on that
 date are left alone, so re-running never creates duplicates. Only titles that
