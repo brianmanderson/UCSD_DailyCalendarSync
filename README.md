@@ -6,10 +6,11 @@ coverage/staffing spreadsheet. Once a day it:
 1. Downloads a shared Google Sheet that has one tab per week.
 2. Scans **this week's and next week's** tabs for every task assigned to a set
    of initials (e.g. `BA`).
-3. Makes sure a matching event exists on the target calendar for each
-   assignment — using task-specific working hours (see
-   [Event hours](#event-hours)), creating any events that are missing and
-   never duplicating ones that already exist.
+3. Makes the target calendar match the sheet — creating an event for every
+   assignment that doesn't have one yet (using task-specific working hours,
+   see [Event hours](#event-hours)), never duplicating events that already
+   exist, and deleting events for coverage tasks you are no longer assigned
+   (see [How the calendar is kept in sync](#how-the-calendar-is-kept-in-sync)).
 
 It runs entirely inside GitHub Actions on a schedule, so nothing has to run on
 your own machine. All credentials and personal settings live in GitHub Actions
@@ -98,6 +99,7 @@ Optional settings (all have defaults):
 | `EVENT_END`         | `07:30`               | Fallback end time                                                   |
 | `TASK_HOURS`        | *(empty)*             | Semicolon-separated `Task Substring=HH:MM-HH:MM` rules that override the built-in hour rules — see [Event hours](#event-hours) |
 | `TITLE_RENAMES`     | `External Beam=Hillcrest;All Clinic=Encinitas` | Semicolon-separated `Sheet Task=Event Title` pairs — renames a task before it becomes an event title. Set to `-` to disable the defaults. |
+| `PRUNE_REMOVED`     | `true`                | Delete events for coverage tasks you're no longer assigned. Set to `false` to make the sync add-only. |
 
 ### Event hours
 
@@ -202,17 +204,41 @@ service account only needs Viewer access to the sheet; no calendar sharing
 required), or make the sheet link-shared ("Anyone with the link can view"),
 in which case only `SHEET_ID` is needed.
 
-## How duplicates are avoided
+## How the calendar is kept in sync
 
-Before creating anything, the script lists the target calendar's events for
-each assignment date and compares titles (trimmed, case-insensitive). If an
-event with the same title already exists that day, it is skipped. This makes
-the sync idempotent: re-running it — or running it every day — never creates
-duplicates, and events you edit or events created by hand with the same title
-are respected.
+The script lists the target calendar's events for each day the sheet covers
+and compares titles (trimmed, case-insensitive).
 
-Note the flip side: the sync only **adds**. If an assignment is removed from
-the sheet, the previously created event is not deleted — remove it by hand.
+**Duplicates.** If an event with the same title already exists that day, it is
+skipped. This makes the sync idempotent: re-running it — or running it every
+day — never creates duplicates, and events you edit or events created by hand
+with the same title are respected. Hours are only applied when an event is
+created; existing events are never modified.
+
+**Removals.** If the sheet changes and you're no longer assigned a task, the
+event is deleted on the next run. Say you were down for Plan Checks on 7/28
+and the sheet is edited that morning to give it to someone else — the next run
+removes "Plan Checks" from your 7/28.
+
+Deletion is deliberately narrow. An event is only a candidate if **its title
+matches a task name in column B of that week's tab** (either as written or
+after `TITLE_RENAMES`). Everything else on your calendar — meetings, PTO,
+appointments — is invisible to the sync, because those titles never appear on
+the sheet. Three more guards:
+
+- **Only today and later.** Past days are never touched, so the calendar keeps
+  its record of what you actually covered even if the sheet is edited
+  retroactively.
+- **Only weeks that parsed.** If a week's tab is missing, that week is skipped
+  entirely rather than treated as "you have no assignments" — a missing tab
+  can't wipe a week of events.
+- **Nothing at all in `DRY_RUN`.** Dry runs report `would delete` and stop
+  there.
+
+The caveat: an event of your own that happens to be titled exactly like a
+coverage task (e.g. a personal event named "Secondary") *will* be deleted on a
+day you aren't assigned it. Rename it, or set `PRUNE_REMOVED` to `false` to
+make the sync add-only.
 
 ## Running locally
 

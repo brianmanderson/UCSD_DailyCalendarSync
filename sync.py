@@ -2,10 +2,12 @@
 """Sync one person's coverage-sheet assignments into a calendar.
 
 Downloads a shared Google Sheet (one tab per week), finds every task assigned
-to the configured initials for this week and next week, and makes sure a
-matching event exists on the target calendar for each assignment. Events with
-the same title already on that date are left alone, so re-running never
-creates duplicates.
+to the configured initials for this week and next week, and makes the target
+calendar match: missing assignments are created, and events for tasks we are
+no longer assigned are deleted. Events with the same title already on that
+date are left alone, so re-running never creates duplicates. Only titles that
+appear as task names on the sheet are ever deleted — unrelated events on the
+same day are untouched.
 
 All configuration comes from environment variables (GitHub Actions secrets) —
 see README.md for the full list.
@@ -136,6 +138,7 @@ class Config:
         self.renames = _parse_renames(_env("TITLE_RENAMES", DEFAULT_RENAMES))
         self.hour_rules = _parse_hour_rules(_env("TASK_HOURS"))
         self.dry_run = _env("DRY_RUN").lower() in ("1", "true", "yes")
+        self.prune = _env("PRUNE_REMOVED", "true").lower() not in ("0", "false", "no")
         self.google_sa_json = _env("GOOGLE_SERVICE_ACCOUNT_JSON")
         self.google_calendar_id = _env("GOOGLE_CALENDAR_ID")
         self.google_calendar_name = _env("GOOGLE_CALENDAR_NAME")
@@ -219,10 +222,10 @@ class GoogleCalendar:
             "'Integrate calendar' > Calendar ID)"
         )
 
-    def existing_titles(self, date):
+    def existing_events(self, date):
         start = datetime.datetime.combine(date, datetime.time(0, 0), self.tz)
         end = datetime.datetime.combine(date, datetime.time(23, 59, 59), self.tz)
-        titles = set()
+        events = {}
         page_token = None
         while True:
             params = {
@@ -237,12 +240,12 @@ class GoogleCalendar:
             _check(response, f"listing events on {date}")
             body = response.json()
             for event in body.get("items", []):
-                summary = (event.get("summary") or "").strip().lower()
+                summary = (event.get("summary") or "").strip()
                 if summary:
-                    titles.add(summary)
+                    events.setdefault(summary.lower(), []).append((event["id"], summary))
             page_token = body.get("nextPageToken")
             if not page_token:
-                return titles
+                return events
 
     def create_event(self, title, date, start, end):
         body = {
@@ -258,6 +261,15 @@ class GoogleCalendar:
         }
         response = self.session.post(f"{self.calendar_path}/events", json=body, timeout=30)
         _check(response, f"creating event {title!r} on {date}")
+        return response.json().get("id")
+
+    def delete_event(self, event_id, title, date):
+        response = self.session.delete(
+            f"{self.calendar_path}/events/{urllib.parse.quote(event_id, safe='')}", timeout=30
+        )
+        if response.status_code in (404, 410):
+            return  # already gone — nothing to do
+        _check(response, f"deleting event {title!r} on {date}")
 
 
 class OutlookCalendar:
@@ -303,15 +315,15 @@ class OutlookCalendar:
             f"no Outlook calendar named {name!r} found for {self.cfg.ms_calendar_user}"
         )
 
-    def existing_titles(self, date):
+    def existing_events(self, date):
         start = datetime.datetime.combine(date, datetime.time(0, 0), self.tz)
         end = datetime.datetime.combine(date, datetime.time(23, 59, 59), self.tz)
-        titles = set()
+        events = {}
         url = f"{self.calendar_path}/calendarView"
         params = {
             "startDateTime": start.isoformat(),
             "endDateTime": end.isoformat(),
-            "$select": "subject",
+            "$select": "id,subject",
             "$top": 100,
         }
         while url:
@@ -319,12 +331,12 @@ class OutlookCalendar:
             _check(response, f"listing events on {date}")
             body = response.json()
             for event in body.get("value", []):
-                subject = (event.get("subject") or "").strip().lower()
+                subject = (event.get("subject") or "").strip()
                 if subject:
-                    titles.add(subject)
+                    events.setdefault(subject.lower(), []).append((event["id"], subject))
             url = body.get("@odata.nextLink")
             params = None
-        return titles
+        return events
 
     def create_event(self, title, date, start, end):
         body = {
@@ -340,6 +352,61 @@ class OutlookCalendar:
         }
         response = self.session.post(f"{self.calendar_path}/events", json=body, timeout=30)
         _check(response, f"creating event {title!r} on {date}")
+        return response.json().get("id")
+
+    def delete_event(self, event_id, title, date):
+        response = self.session.delete(
+            f"{self.calendar_path}/events/{urllib.parse.quote(event_id, safe='')}", timeout=30
+        )
+        if response.status_code == 404:
+            return  # already gone — nothing to do
+        _check(response, f"deleting event {title!r} on {date}")
+
+
+def sheet_titles(cfg, week):
+    """Every event title this week's tab could produce — each task name as
+    written, plus its renamed form, so titles left behind by an older
+    TITLE_RENAMES setting are still recognised as ours."""
+    titles = set()
+    for task in week["tasks"]:
+        titles.add(task.strip().lower())
+        titles.add(cfg.renames.get(task.lower(), task).strip().lower())
+    return titles
+
+
+def prune_removed(cfg, target, data, today, events_on, assigned_titles, warnings):
+    """Delete events for tasks we are no longer assigned.
+
+    An event is only a candidate if its title matches a task name on that
+    week's tab, so anything the sheet never mentions — meetings, PTO, personal
+    events — is left alone. Days before today are left alone as well: the
+    calendar keeps its record of what actually happened.
+    """
+    rows = []
+    for week in data["weeks"]:
+        if week.get("error"):
+            continue  # tab missing — we have no idea what belongs on those days
+        known = sheet_titles(cfg, week)
+        for day in week["days"]:
+            date = datetime.date.fromisoformat(day["date"])
+            if date < today:
+                continue
+            keep = assigned_titles.get(date, set())
+            for key, events in sorted(events_on(date).items()):
+                if key not in known or key in keep:
+                    continue
+                for event_id, title in events:
+                    if cfg.dry_run:
+                        status = "would delete (dry run)"
+                    else:
+                        try:
+                            target.delete_event(event_id, title, date)
+                            status = "deleted"
+                        except RuntimeError as exc:
+                            warnings.append(str(exc))
+                            status = "delete failed"
+                    rows.append((week["label"], day["date"], day["day"], title, "-", status))
+    return rows
 
 
 def report(cfg, today, data, rows, warnings):
@@ -398,7 +465,14 @@ def main():
 
     rows = []
     warnings = []
-    titles_by_date = {}
+    events_by_date = {}
+    assigned_titles = {}
+
+    def events_on(date):
+        if date not in events_by_date:
+            events_by_date[date] = target.existing_events(date)
+        return events_by_date[date]
+
     for week in data["weeks"]:
         if week.get("error"):
             warnings.append(f"{week['label']} (Monday {week['monday']}): {week['error']}")
@@ -406,21 +480,25 @@ def main():
         for assignment in week["assignments"]:
             title = cfg.renames.get(assignment["task"].lower(), assignment["task"])
             date = datetime.date.fromisoformat(assignment["date"])
+            key = title.strip().lower()
             start, end = event_hours(cfg, assignment["task"], assignment.get("section"))
-            if date not in titles_by_date:
-                titles_by_date[date] = target.existing_titles(date)
-            if title.strip().lower() in titles_by_date[date]:
+            assigned_titles.setdefault(date, set()).add(key)
+            if key in events_on(date):
                 status = "already exists"
             elif cfg.dry_run:
                 status = "would create (dry run)"
             else:
-                target.create_event(title, date, start, end)
-                titles_by_date[date].add(title.strip().lower())
+                event_id = target.create_event(title, date, start, end)
+                events_on(date).setdefault(key, []).append((event_id, title))
                 status = "created"
             rows.append(
                 (week["label"], assignment["date"], assignment["day"], title, f"{start}-{end}", status)
             )
 
+    if cfg.prune:
+        rows.extend(prune_removed(cfg, target, data, today, events_on, assigned_titles, warnings))
+
+    rows.sort(key=lambda row: (row[1], row[3]))
     report(cfg, today, data, rows, warnings)
 
 

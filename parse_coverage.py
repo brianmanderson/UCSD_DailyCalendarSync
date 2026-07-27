@@ -28,7 +28,12 @@ def _as_date(value):
 
 
 def parse_assignments(xlsx_path, initials, today):
-    """Return this week's and next week's assignments for the given initials."""
+    """Return this week's and next week's assignments for the given initials.
+
+    Each week also carries the days it covers and every task name listed on
+    that tab (whoever they are assigned to), so the caller can tell which
+    calendar events came from the sheet and which are unrelated.
+    """
     workbook = openpyxl.load_workbook(xlsx_path, data_only=True)
     initials = initials.strip().upper()
     monday = today - datetime.timedelta(days=today.weekday())
@@ -40,7 +45,14 @@ def parse_assignments(xlsx_path, initials, today):
 
 
 def _parse_week(workbook, monday, label, initials):
-    week = {"label": label, "monday": monday.isoformat(), "sheet": None, "assignments": []}
+    week = {
+        "label": label,
+        "monday": monday.isoformat(),
+        "sheet": None,
+        "days": [],
+        "tasks": [],
+        "assignments": [],
+    }
     sheet = None
     for name in workbook.sheetnames:
         if _as_date(workbook[name].cell(row=1, column=3).value) == monday:
@@ -50,6 +62,17 @@ def _parse_week(workbook, monday, label, initials):
         week["error"] = f"no tab whose first date cell (C1) is {monday.isoformat()}"
         return week
     week["sheet"] = sheet.title
+
+    for col in DAY_COLUMNS:
+        date = _as_date(sheet.cell(row=1, column=col).value)
+        if date is None:
+            continue
+        week["days"].append(
+            {
+                "date": date.isoformat(),
+                "day": str(sheet.cell(row=2, column=col).value or "").strip(),
+            }
+        )
 
     section = None
     for row in range(1, sheet.max_row + 1):
@@ -61,6 +84,8 @@ def _parse_week(workbook, monday, label, initials):
         task = sheet.cell(row=row, column=2).value
         if not (task and str(task).strip()):
             continue
+        if str(task).strip() not in week["tasks"]:
+            week["tasks"].append(str(task).strip())
         for col in DAY_COLUMNS:
             value = sheet.cell(row=row, column=col).value
             if value is None or str(value).strip().upper() != initials:
